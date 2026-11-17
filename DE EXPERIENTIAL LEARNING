@@ -1,0 +1,189 @@
+# K-Map Simplification for 3 variables (A, B, C)
+
+from itertools import combinations
+
+VARS = ['A', 'B', 'C']
+NUM_VARS = 3
+
+
+# ---------- Core Quine-McCluskey logic ----------
+
+def to_bin(n, bits=NUM_VARS):
+    return format(n, f'0{bits}b')
+
+
+def combine_terms(t1, t2):
+    """Combine two terms if they differ in exactly one bit position.
+    Returns the combined term (with '-' at that position) or None."""
+    diff = 0
+    pos = -1
+    for i, (a, b) in enumerate(zip(t1, t2)):
+        if a != b:
+            diff += 1
+            pos = i
+            if diff > 1:
+                return None
+    if diff == 1:
+        return t1[:pos] + '-' + t1[pos + 1:]
+    return None
+
+
+def get_prime_implicants(minterms, dontcares):
+    all_terms = sorted(set(minterms) | set(dontcares))
+    if not all_terms:
+        return []
+
+    # group terms by binary string, tagged with the set of minterms they cover
+    current = {to_bin(n): {n} for n in all_terms}
+    prime_implicants = {}  # term_string -> covered minterms
+
+    while current:
+        next_level = {}
+        combined_flags = {k: False for k in current}
+        keys = list(current.keys())
+
+        for t1, t2 in combinations(keys, 2):
+            combined = combine_terms(t1, t2)
+            if combined is not None:
+                combined_flags[t1] = True
+                combined_flags[t2] = True
+                next_level[combined] = current[t1] | current[t2]
+
+        # anything that never combined is a prime implicant
+        for k in keys:
+            if not combined_flags[k]:
+                prime_implicants[k] = current[k]
+
+        current = next_level
+
+    return prime_implicants  # dict: term -> set of minterms it covers
+
+
+def select_essential_pis(prime_implicants, minterms):
+    """Build a coverage chart, pick essential PIs, then greedily cover the rest."""
+    chart = {m: [] for m in minterms}
+    for term, covered in prime_implicants.items():
+        for m in covered:
+            if m in chart:
+                chart[m].append(term)
+
+    essential = set()
+    for m, terms_covering in chart.items():
+        if len(terms_covering) == 1:
+            essential.add(terms_covering[0])
+
+    covered_minterms = set()
+    for term in essential:
+        covered_minterms |= (prime_implicants[term] & set(minterms))
+
+    remaining = set(minterms) - covered_minterms
+    chosen = set(essential)
+
+    # greedy set-cover for any leftover minterms not covered by essential PIs
+    while remaining:
+        best_term = max(
+            prime_implicants,
+            key=lambda t: len(prime_implicants[t] & remaining)
+        )
+        if len(prime_implicants[best_term] & remaining) == 0:
+            break
+        chosen.add(best_term)
+        remaining -= prime_implicants[best_term]
+
+    return chosen
+
+
+def term_to_expr(term):
+    """Convert a term like '1-0' into a product term like A.B'"""
+    parts = []
+    for bit, var in zip(term, VARS):
+        if bit == '1':
+            parts.append(var)
+        elif bit == '0':
+            parts.append(var + "'")
+        # '-' means variable is eliminated, skip it
+    return ''.join(parts) if parts else '1'
+
+
+def term_to_assignment(term):
+    """Describe which of A, B, C are fixed (and to what value) vs eliminated,
+    e.g. '1-0' -> 'A=1, B=eliminated, C=0'"""
+    desc = []
+    for bit, var in zip(term, VARS):
+        if bit == '-':
+            desc.append(f"{var}=eliminated")
+        else:
+            desc.append(f"{var}={bit}")
+    return ', '.join(desc)
+
+
+# ---------- K-map display ----------
+
+def print_kmap(minterms, dontcares):
+    minterms = set(minterms)
+    dontcares = set(dontcares)
+    # Gray code column order for BC
+    col_labels = ['00', '01', '11', '10']
+    bc_vals = {'00': 0, '01': 1, '11': 3, '10': 2}
+
+    print("\nK-Map (rows = A, columns = BC):\n")
+    header = "       " + "   ".join(col_labels)
+    print(header)
+    for a in [0, 1]:
+        row_cells = []
+        for col in col_labels:
+            b, c = int(col[0]), int(col[1])
+            idx = 4 * a + 2 * b + 1 * c
+            if idx in minterms:
+                cell = '1'
+            elif idx in dontcares:
+                cell = 'X'
+            else:
+                cell = '0'
+            row_cells.append(f" {cell} ")
+        print(f"A={a} | " + " | ".join(row_cells) + " |")
+    print()
+
+
+# ---------- Main solve routine ----------
+
+def solve_kmap(minterms, dontcares=None):
+    dontcares = dontcares or []
+    print_kmap(minterms, dontcares)
+
+    prime_implicants = get_prime_implicants(minterms, dontcares)
+
+    print("All Prime Implicants (groups found):")
+    for term, covered in prime_implicants.items():
+        covered_actual = sorted(covered)
+        print(f"  Term {term}  ->  covers minterms {covered_actual}  ->  {term_to_expr(term)}")
+
+    chosen = select_essential_pis(prime_implicants, minterms)
+
+    print("\nSelected groups for minimum cover:")
+    for term in chosen:
+        print(f"  Group {term}  (minterms {sorted(prime_implicants[term])})  ->  {term_to_expr(term)}")
+
+    print("\nBoolean expression of each group, in terms of A, B, C:")
+    for term in chosen:
+        print(f"  {term_to_assignment(term)}  =>  {term_to_expr(term)}")
+
+    expr_terms = [term_to_expr(t) for t in chosen]
+    simplified_expr = ' + '.join(sorted(expr_terms))
+
+    print(f"\nFinal Simplified Boolean Expression (in terms of A, B, C):\nF(A,B,C) = {simplified_expr}\n")
+    return simplified_expr
+
+
+# ---------- User input ----------
+
+if __name__ == "__main__":
+    print("3-Variable K-Map Solver (variables: A, B, C)")
+    print("Enter minterms as comma-separated numbers from 0-7.")
+    mt_input = input("Minterms (e.g. 1,2,3,7): ").strip()
+    minterms = [int(x) for x in mt_input.split(',') if x.strip() != '']
+
+    dc_input = input("Don't-care terms (optional, comma-separated, or leave blank): ").strip()
+    dontcares = [int(x) for x in dc_input.split(',') if x.strip() != ''] if dc_input else []
+
+    solve_kmap(minterms, dontcares)
